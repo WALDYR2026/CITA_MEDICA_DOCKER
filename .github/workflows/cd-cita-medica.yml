@@ -1,0 +1,77 @@
+# Este workflow NO despliega en el runner efimero de GitHub.
+# Requiere un servidor Linux propio con Docker, Compose, runner self-hosted
+# restringido, archivo /srv/cita-medica/.env y permisos de despliegue.
+name: CD - CITA_MEDICA Docker Host
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: cita-medica-production
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_DATABASE: CITA_MEDICA
+          MYSQL_USER: citas_app
+          MYSQL_PASSWORD: test_app_password_only
+          MYSQL_ROOT_PASSWORD: test_root_password_only
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -ptest_root_password_only"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Preparar base temporal
+        env:
+          MYSQL_PWD: test_root_password_only
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y default-mysql-client
+          mysql -h 127.0.0.1 -uroot CITA_MEDICA < sql/01_instalacion_nueva_6_tablas.sql
+      - name: Verificacion Maven
+        env:
+          SPRING_DATASOURCE_URL: jdbc:mysql://127.0.0.1:3306/CITA_MEDICA?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+          SPRING_DATASOURCE_USERNAME: citas_app
+          SPRING_DATASOURCE_PASSWORD: test_app_password_only
+        run: mvn --batch-mode clean verify
+  deploy:
+    needs: verify
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, x64, cita-medica-deploy]
+    environment: production
+    steps:
+      - uses: actions/checkout@v7
+      - name: Actualizar servicios sin borrar el volumen MySQL
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f /srv/cita-medica/.env
+          docker compose --env-file /srv/cita-medica/.env -f compose.yaml config --quiet
+          docker compose --env-file /srv/cita-medica/.env -f compose.yaml up -d --build --remove-orphans
+          docker compose --env-file /srv/cita-medica/.env -f compose.yaml ps
+      - name: Smoke test de la pagina principal
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8080/ >/dev/null; then
+              echo 'CITA_MEDICA responde HTTP OK'
+              exit 0
+            fi
+            sleep 5
+          done
+          echo 'La aplicacion no respondio a tiempo'
+          docker compose --env-file /srv/cita-medica/.env -f compose.yaml logs --tail=100 app
+          exit 1

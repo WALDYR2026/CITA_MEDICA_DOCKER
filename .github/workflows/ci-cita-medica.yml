@@ -1,0 +1,57 @@
+name: CI - CITA_MEDICA Java MySQL
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build-test:
+    runs-on: ubuntu-24.04
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_DATABASE: CITA_MEDICA
+          MYSQL_USER: citas_app
+          MYSQL_PASSWORD: test_app_password_only
+          MYSQL_ROOT_PASSWORD: test_root_password_only
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -ptest_root_password_only"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=15
+    steps:
+      - name: Obtener codigo
+        uses: actions/checkout@v7
+      - name: Instalar Java 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Instalar cliente MySQL
+        run: sudo apt-get update && sudo apt-get install -y default-mysql-client
+      - name: Crear las seis tablas en BD temporal
+        env:
+          MYSQL_PWD: test_root_password_only
+        run: mysql -h 127.0.0.1 -P 3306 -uroot CITA_MEDICA < sql/01_instalacion_nueva_6_tablas.sql
+      - name: Compilar y ejecutar tests
+        env:
+          SPRING_DATASOURCE_URL: jdbc:mysql://127.0.0.1:3306/CITA_MEDICA?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+          SPRING_DATASOURCE_USERNAME: citas_app
+          SPRING_DATASOURCE_PASSWORD: test_app_password_only
+          SPRING_JPA_HIBERNATE_DDL_AUTO: validate
+        run: mvn --batch-mode clean verify
+      - name: Guardar JAR si se validaron las pruebas
+        uses: actions/upload-artifact@v4
+        with:
+          name: cita-medica-jar
+          path: target/*.jar
+          if-no-files-found: error
+      - name: Comprobar construccion de imagen Docker
+        run: docker build -t cita-medica:test .
